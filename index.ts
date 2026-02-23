@@ -18,12 +18,14 @@ const IMAGE_HEIGHT = 100
 const IMAGE_Y = 0
 
 const WORD_GAP = 6
-const FONT_SIZE = 28
+const FONT_SIZE = 22
 const FONT = `${FONT_SIZE}px sans-serif`
-const LINE_HEIGHT = 32
+const LINE_HEIGHT = 24
+const MAX_VISIBLE_LINES = 3
 const PADDING_TOP = 6
 const PADDING_LEFT = 8
 const PADDING_RIGHT = 8
+const CLEAR_AFTER_IDLE_MS = 4000
 
 const TARGET_TEXT = 'سلام'
 
@@ -38,9 +40,39 @@ type AppendResult = {
   touched: Set<number>
 }
 
+type RecognitionResultEventLike = Event & {
+  resultIndex: number
+  results: ArrayLike<{
+    isFinal: boolean
+    0: {
+      transcript: string
+    }
+  }>
+}
+
+type SpeechRecognitionLike = {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  onresult: ((event: RecognitionResultEventLike) => void) | null
+  onerror: ((event: Event) => void) | null
+  onend: (() => void) | null
+  start: () => void
+  stop: () => void
+}
+
+type SpeechRecognitionConstructorLike = new () => SpeechRecognitionLike
+
 let bridge: EvenAppBridge | null = null
 let streamQueue: Promise<void> = Promise.resolve()
 let phraseWords: string[] = []
+let translateQueue: Promise<void> = Promise.resolve()
+let recognition: SpeechRecognitionLike | null = null
+let micRunning = false
+let clearIdleTimer: number | null = null
+
+const OPENAI_KEY_STORAGE_KEY = 'farsi-bridge:openai-key'
+const OPENAI_MODEL = 'gpt-4o-mini'
 
 const virtualCanvas = createCanvas(DISPLAY_WIDTH, IMAGE_HEIGHT)
 const virtualCtxCandidate = virtualCanvas.getContext('2d')
@@ -51,9 +83,10 @@ let cursorRightX = DISPLAY_WIDTH - PADDING_RIGHT
 let lineIndex = 0
 
 function splitWords(text: string): string[] {
+  const SPACE_SEPARATORS = /[ \t\r\n\f\v\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\u200B]+/
   return text
     .trim()
-    .split(/\s+/)
+    .split(SPACE_SEPARATORS)
     .filter(Boolean)
 }
 
@@ -137,6 +170,26 @@ function baselineForLine(index: number): number {
   return PADDING_TOP + FONT_SIZE + index * LINE_HEIGHT
 }
 
+function scrollSurfaceUpOneLine(): void {
+  virtualCtx.drawImage(
+    virtualCanvas,
+    0,
+    LINE_HEIGHT,
+    DISPLAY_WIDTH,
+    IMAGE_HEIGHT - LINE_HEIGHT,
+    0,
+    0,
+    DISPLAY_WIDTH,
+    IMAGE_HEIGHT - LINE_HEIGHT,
+  )
+
+  virtualCtx.fillStyle = '#000000'
+  virtualCtx.fillRect(0, 0, DISPLAY_WIDTH, PADDING_TOP + 2)
+
+  virtualCtx.fillStyle = '#000000'
+  virtualCtx.fillRect(0, IMAGE_HEIGHT - LINE_HEIGHT, DISPLAY_WIDTH, LINE_HEIGHT)
+}
+
 function placeWord(rawWord: string): WordBox | null {
   const shaped = shapeWord(rawWord)
   const width = measureWordWidth(shaped)
@@ -148,9 +201,16 @@ function placeWord(rawWord: string): WordBox | null {
     cursorRightX = lineStartRight()
   }
 
-  const baselineY = baselineForLine(lineIndex)
-  if (baselineY > IMAGE_HEIGHT - 2) {
-    return null
+  if (lineIndex >= MAX_VISIBLE_LINES) {
+    scrollSurfaceUpOneLine()
+    lineIndex = MAX_VISIBLE_LINES - 1
+  }
+
+  let baselineY = baselineForLine(lineIndex)
+  while (baselineY > IMAGE_HEIGHT - 2) {
+    scrollSurfaceUpOneLine()
+    lineIndex -= 1
+    baselineY = baselineForLine(lineIndex)
   }
 
   const right = cursorRightX
@@ -281,6 +341,7 @@ function addWordsFromInput(rawInput: string): void {
   if (incoming.length === 0) return
 
   const result = appendWords(incoming)
+  scheduleIdleClear()
   updatePreview()
 
   if (result.touched.size > 0) {
@@ -296,6 +357,11 @@ function addWordsFromInput(rawInput: string): void {
 }
 
 function clearPhrase(): void {
+  if (clearIdleTimer !== null) {
+    window.clearTimeout(clearIdleTimer)
+    clearIdleTimer = null
+  }
+
   phraseWords = []
   clearVirtualSurface()
   updatePreview()
@@ -303,12 +369,28 @@ function clearPhrase(): void {
   setStatus('Cleared')
 }
 
+function scheduleIdleClear(): void {
+  if (clearIdleTimer !== null) {
+    window.clearTimeout(clearIdleTimer)
+  }
+
+  clearIdleTimer = window.setTimeout(() => {
+    clearPhrase()
+  }, CLEAR_AFTER_IDLE_MS)
+}
+
 function setupWebControls(): void {
   const input = document.getElementById('wordInput') as HTMLInputElement | null
   const addButton = document.getElementById('addWordBtn') as HTMLButtonElement | null
   const clearButton = document.getElementById('clearBtn') as HTMLButtonElement | null
+  const startMicButton = document.getElementById('startMicBtn') as HTMLButtonElement | null
+  const stopMicButton = document.getElementById('stopMicBtn') as HTMLButtonElement | null
+  const openAiKeyInput = document.getElementById('openaiKeyInput') as HTMLInputElement | null
 
   updatePreview()
+
+  const savedKey = localStorage.getItem(OPENAI_KEY_STORAGE_KEY) ?? ''
+  if (openAiKeyInput) openAiKeyInput.value = savedKey
 
   const submit = () => {
     if (!input) return
@@ -320,12 +402,173 @@ function setupWebControls(): void {
 
   addButton?.addEventListener('click', submit)
   clearButton?.addEventListener('click', () => clearPhrase())
+  startMicButton?.addEventListener('click', () => {
+    void startRealtimeTranslation()
+  })
+  stopMicButton?.addEventListener('click', () => {
+    stopRealtimeTranslation()
+  })
+  openAiKeyInput?.addEventListener('change', () => {
+    localStorage.setItem(OPENAI_KEY_STORAGE_KEY, openAiKeyInput.value.trim())
+  })
   input?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault()
       submit()
     }
   })
+}
+
+function getOpenAIKey(): string {
+  const input = document.getElementById('openaiKeyInput') as HTMLInputElement | null
+  return input?.value.trim() ?? ''
+}
+
+function getSpeechRecognitionConstructor(): SpeechRecognitionConstructorLike | null {
+  const w = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructorLike
+    webkitSpeechRecognition?: SpeechRecognitionConstructorLike
+  }
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
+}
+
+function extractOutputText(json: unknown): string {
+  const payload = json as {
+    output_text?: string
+    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>
+  }
+
+  if (typeof payload.output_text === 'string' && payload.output_text.trim().length > 0) {
+    return payload.output_text.trim()
+  }
+
+  const chunks = payload.output ?? []
+  const collected: string[] = []
+
+  for (const item of chunks) {
+    for (const content of item.content ?? []) {
+      if (content.type === 'output_text' && typeof content.text === 'string') {
+        collected.push(content.text)
+      }
+    }
+  }
+
+  return collected.join(' ').trim()
+}
+
+async function translateEnglishToFarsi(englishText: string): Promise<string> {
+  const apiKey = getOpenAIKey()
+  if (!apiKey) throw new Error('OpenAI API key is missing')
+
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      input: [
+        {
+          role: 'system',
+          content:
+            'You are a real-time translator. Convert English speech text to natural Persian (Farsi). Return only Persian text with no explanations.',
+        },
+        {
+          role: 'user',
+          content: englishText,
+        },
+      ],
+      temperature: 0.2,
+    }),
+  })
+
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(`OpenAI translation failed: ${response.status} ${message}`)
+  }
+
+  const data = (await response.json()) as unknown
+  return extractOutputText(data)
+}
+
+function enqueueTranslation(englishText: string): void {
+  const trimmed = englishText.trim()
+  if (!trimmed) return
+
+  translateQueue = translateQueue
+    .then(async () => {
+      setStatus('Listening… translating')
+      const farsi = await translateEnglishToFarsi(trimmed)
+      if (!farsi) return
+      addWordsFromInput(farsi)
+      setStatus('Listening…')
+    })
+    .catch((error) => {
+      console.error('[farsi-bridge] translation failed', error)
+      setStatus('Translation failed')
+    })
+}
+
+async function startRealtimeTranslation(): Promise<void> {
+  if (micRunning) return
+
+  const apiKey = getOpenAIKey()
+  if (!apiKey) {
+    setStatus('Enter OpenAI API key first')
+    return
+  }
+
+  localStorage.setItem(OPENAI_KEY_STORAGE_KEY, apiKey)
+
+  const RecognitionCtor = getSpeechRecognitionConstructor()
+  if (!RecognitionCtor) {
+    setStatus('SpeechRecognition not supported in this browser')
+    return
+  }
+
+  recognition = new RecognitionCtor()
+  recognition.continuous = true
+  recognition.interimResults = true
+  recognition.lang = 'en-US'
+
+  recognition.onresult = (event) => {
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const res = event.results[index]
+      if (!res?.isFinal) continue
+
+      const transcript = res[0]?.transcript?.trim() ?? ''
+      if (transcript.length > 0) {
+        enqueueTranslation(transcript)
+      }
+    }
+  }
+
+  recognition.onerror = () => {
+    setStatus('Mic/recognition error')
+  }
+
+  recognition.onend = () => {
+    if (micRunning && recognition) {
+      try {
+        recognition.start()
+      } catch {
+      }
+    }
+  }
+
+  micRunning = true
+  recognition.start()
+  setStatus('Listening…')
+}
+
+function stopRealtimeTranslation(): void {
+  micRunning = false
+  if (recognition) {
+    recognition.stop()
+    recognition = null
+  }
+  setStatus('Mic stopped')
 }
 
 async function buildPage(appBridge: EvenAppBridge): Promise<void> {

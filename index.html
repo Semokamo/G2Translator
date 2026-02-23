@@ -32,6 +32,13 @@
       margin-top: 10px;
     }
 
+    .label {
+      display: block;
+      margin-top: 10px;
+      color: #c7c7c7;
+      font-size: 13px;
+    }
+
     input {
       flex: 1;
       min-width: 220px;
@@ -73,6 +80,12 @@
   <div id="app">
     <div class="panel">
       <div>Farsi Rendering Bridge</div>
+      <label class="label" for="openaiKeyInput">OpenAI API key</label>
+      <input id="openaiKeyInput" type="password" placeholder="Paste OpenAI API key" />
+      <div class="row">
+        <button id="startMicBtn" type="button">Start real-time EN→FA</button>
+        <button id="stopMicBtn" type="button">Stop</button>
+      </div>
       <div class="row">
         <input id="wordInput" type="text" dir="rtl" placeholder="یک کلمه بنویسید" />
         <button id="addWordBtn" type="button">Add word</button>
