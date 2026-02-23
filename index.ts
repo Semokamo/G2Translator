@@ -18,20 +18,29 @@ const IMAGE_HEIGHT = 100
 const IMAGE_Y = 0
 
 const WORD_GAP = 6
-const FONT_SIZE = 22
+const FONT_SIZE = 15
 const FONT = `${FONT_SIZE}px sans-serif`
-const LINE_HEIGHT = 24
-const MAX_VISIBLE_LINES = 3
+const LINE_HEIGHT = 17
+const MAX_VISIBLE_LINES = 4
 const PADDING_TOP = 6
 const PADDING_LEFT = 8
 const PADDING_RIGHT = 8
 const CLEAR_AFTER_IDLE_MS = 4000
+const WORD_FEED_DELAY_MS = 130
+const WORDS_PER_UPDATE = 2
+const BLE_COALESCE_WINDOW_MS = 120
+const BLE_MIN_UPDATE_INTERVAL_MS = 260
 
 const TARGET_TEXT = 'سلام'
 
 type WordBox = {
   left: number
   right: number
+}
+
+type WordPlacement = {
+  box: WordBox
+  didScroll: boolean
 }
 
 type AppendResult = {
@@ -67,9 +76,14 @@ let bridge: EvenAppBridge | null = null
 let streamQueue: Promise<void> = Promise.resolve()
 let phraseWords: string[] = []
 let translateQueue: Promise<void> = Promise.resolve()
+let wordFeedQueue: Promise<void> = Promise.resolve()
 let recognition: SpeechRecognitionLike | null = null
 let micRunning = false
 let clearIdleTimer: number | null = null
+let pendingFlushTimer: number | null = null
+let lastBleFlushAt = 0
+const pendingSegments = new Set<number>()
+let pendingResolvers: Array<() => void> = []
 
 const OPENAI_KEY_STORAGE_KEY = 'farsi-bridge:openai-key'
 const OPENAI_MODEL = 'gpt-4o-mini'
@@ -83,10 +97,9 @@ let cursorRightX = DISPLAY_WIDTH - PADDING_RIGHT
 let lineIndex = 0
 
 function splitWords(text: string): string[] {
-  const SPACE_SEPARATORS = /[ \t\r\n\f\v\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\u200B]+/
   return text
     .trim()
-    .split(SPACE_SEPARATORS)
+    .split(/\s+/)
     .filter(Boolean)
 }
 
@@ -170,7 +183,14 @@ function baselineForLine(index: number): number {
   return PADDING_TOP + FONT_SIZE + index * LINE_HEIGHT
 }
 
-function scrollSurfaceUpOneLine(): void {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function removeTopLineThenShiftUp(): void {
+  virtualCtx.fillStyle = '#000000'
+  virtualCtx.fillRect(0, 0, DISPLAY_WIDTH, LINE_HEIGHT)
+
   virtualCtx.drawImage(
     virtualCanvas,
     0,
@@ -184,31 +204,30 @@ function scrollSurfaceUpOneLine(): void {
   )
 
   virtualCtx.fillStyle = '#000000'
-  virtualCtx.fillRect(0, 0, DISPLAY_WIDTH, PADDING_TOP + 2)
-
-  virtualCtx.fillStyle = '#000000'
   virtualCtx.fillRect(0, IMAGE_HEIGHT - LINE_HEIGHT, DISPLAY_WIDTH, LINE_HEIGHT)
 }
 
-function placeWord(rawWord: string): WordBox | null {
+function placeWord(rawWord: string): WordPlacement | null {
   const shaped = shapeWord(rawWord)
   const width = measureWordWidth(shaped)
   const minX = PADDING_LEFT
   const startOfLine = cursorRightX === lineStartRight()
+  let didScroll = false
 
   if (!startOfLine && cursorRightX - width < minX) {
-    lineIndex += 1
+    if (lineIndex + 1 >= MAX_VISIBLE_LINES) {
+      removeTopLineThenShiftUp()
+      didScroll = true
+    } else {
+      lineIndex += 1
+    }
     cursorRightX = lineStartRight()
-  }
-
-  if (lineIndex >= MAX_VISIBLE_LINES) {
-    scrollSurfaceUpOneLine()
-    lineIndex = MAX_VISIBLE_LINES - 1
   }
 
   let baselineY = baselineForLine(lineIndex)
   while (baselineY > IMAGE_HEIGHT - 2) {
-    scrollSurfaceUpOneLine()
+    removeTopLineThenShiftUp()
+    didScroll = true
     lineIndex -= 1
     baselineY = baselineForLine(lineIndex)
   }
@@ -225,7 +244,10 @@ function placeWord(rawWord: string): WordBox | null {
 
   cursorRightX -= width + WORD_GAP
 
-  return { left, right }
+  return {
+    box: { left, right },
+    didScroll,
+  }
 }
 
 function touchedSegments(box: WordBox): number[] {
@@ -287,15 +309,48 @@ async function updateSegments(indices: number[]): Promise<void> {
   }
 }
 
-function queueSegmentUpdates(indices: number[]): void {
-  if (!bridge) return
+function queueSegmentUpdates(indices: number[]): Promise<void> {
+  if (!bridge) return Promise.resolve()
 
-  streamQueue = streamQueue
-    .then(() => updateSegments(indices))
-    .catch((error) => {
-      console.error('[farsi-bridge] stream failed', error)
-      setStatus('Stream failed')
-    })
+  for (const index of indices) {
+    pendingSegments.add(index)
+  }
+
+  const completion = new Promise<void>((resolve) => {
+    pendingResolvers.push(resolve)
+  })
+
+  if (pendingFlushTimer === null) {
+    pendingFlushTimer = window.setTimeout(() => {
+      pendingFlushTimer = null
+
+      const segmentsToFlush = [...pendingSegments]
+      pendingSegments.clear()
+
+      const resolvers = pendingResolvers
+      pendingResolvers = []
+
+      streamQueue = streamQueue
+        .then(async () => {
+          const elapsed = Date.now() - lastBleFlushAt
+          if (elapsed < BLE_MIN_UPDATE_INTERVAL_MS) {
+            await sleep(BLE_MIN_UPDATE_INTERVAL_MS - elapsed)
+          }
+
+          await updateSegments(segmentsToFlush)
+          lastBleFlushAt = Date.now()
+        })
+        .catch((error) => {
+          console.error('[farsi-bridge] stream failed', error)
+          setStatus('Stream failed')
+        })
+        .finally(() => {
+          for (const done of resolvers) done()
+        })
+    }, BLE_COALESCE_WINDOW_MS)
+  }
+
+  return completion
 }
 
 function appendWords(incomingWords: string[]): AppendResult {
@@ -304,8 +359,8 @@ function appendWords(incomingWords: string[]): AppendResult {
   let dropped = 0
 
   for (const word of incomingWords) {
-    const box = placeWord(word)
-    if (!box) {
+    const placement = placeWord(word)
+    if (!placement) {
       dropped += 1
       continue
     }
@@ -313,7 +368,13 @@ function appendWords(incomingWords: string[]): AppendResult {
     phraseWords.push(word)
     added += 1
 
-    for (const segmentIndex of touchedSegments(box)) {
+    if (placement.didScroll) {
+      for (let segmentIndex = 0; segmentIndex < SEGMENT_COUNT; segmentIndex += 1) {
+        touched.add(segmentIndex)
+      }
+    }
+
+    for (const segmentIndex of touchedSegments(placement.box)) {
       touched.add(segmentIndex)
     }
   }
@@ -340,20 +401,38 @@ function addWordsFromInput(rawInput: string): void {
   const incoming = splitWords(rawInput)
   if (incoming.length === 0) return
 
-  const result = appendWords(incoming)
-  scheduleIdleClear()
-  updatePreview()
+  wordFeedQueue = wordFeedQueue.then(async () => {
+    let added = 0
+    let dropped = 0
 
-  if (result.touched.size > 0) {
-    queueSegmentUpdates([...result.touched])
-  }
+    for (let index = 0; index < incoming.length; index += WORDS_PER_UPDATE) {
+      const chunk = incoming.slice(index, index + WORDS_PER_UPDATE)
+      const result = appendWords(chunk)
+      added += result.added
+      dropped += result.dropped
 
-  if (result.dropped > 0) {
-    setStatus(`Added ${result.added} word(s), dropped ${result.dropped} (no space left)`)
-    return
-  }
+      scheduleIdleClear()
+      updatePreview()
 
-  setStatus(`Added ${result.added} word(s)`)
+      if (result.touched.size > 0) {
+        await queueSegmentUpdates([...result.touched])
+      }
+
+      if (incoming.length > WORDS_PER_UPDATE) {
+        await sleep(WORD_FEED_DELAY_MS)
+      }
+    }
+
+    if (dropped > 0) {
+      setStatus(`Added ${added} word(s), dropped ${dropped} (no space left)`)
+      return
+    }
+
+    setStatus(`Added ${added} word(s)`)
+  }).catch((error) => {
+    console.error('[farsi-bridge] word feed failed', error)
+    setStatus('Word feed failed')
+  })
 }
 
 function clearPhrase(): void {
