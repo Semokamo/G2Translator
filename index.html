@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Farsi Rendering Bridge</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      background: #111;
+      color: #f5f5f5;
+    }
+
+    #app {
+      max-width: 680px;
+      margin: 24px auto;
+      padding: 16px;
+    }
+
+    .panel {
+      border: 1px solid #2e2e2e;
+      border-radius: 10px;
+      padding: 14px;
+      background: #181818;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+
+    input {
+      flex: 1;
+      min-width: 220px;
+      border-radius: 8px;
+      border: 1px solid #3b3b3b;
+      background: #101010;
+      color: #fff;
+      padding: 10px;
+      font-size: 16px;
+    }
+
+    button {
+      border-radius: 8px;
+      border: 1px solid #3b3b3b;
+      background: #222;
+      color: #fff;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+
+    #preview {
+      margin-top: 12px;
+      font-size: 26px;
+      direction: rtl;
+      text-align: right;
+      min-height: 36px;
+      border-top: 1px solid #2e2e2e;
+      padding-top: 10px;
+    }
+
+    #status {
+      margin-top: 8px;
+      color: #9d9d9d;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="panel">
+      <div>Farsi Rendering Bridge</div>
+      <div class="row">
+        <input id="wordInput" type="text" dir="rtl" placeholder="یک کلمه بنویسید" />
+        <button id="addWordBtn" type="button">Add word</button>
+        <button id="clearBtn" type="button">Clear</button>
+      </div>
+      <div id="preview"></div>
+      <div id="status">Connecting to Even bridge...</div>
+    </div>
+  </div>
+  <script type="module" src="/index.ts"></script>
+</body>
+</html>
