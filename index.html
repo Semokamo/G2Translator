@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Farsi Rendering Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500&family=Noto+Nastaliq+Urdu:wght@400;500&family=Vazirmatn:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     body {
       font-family: system-ui, -apple-system, sans-serif;
@@ -39,7 +42,8 @@
       font-size: 13px;
     }
 
-    input {
+    input,
+    select {
       flex: 1;
       min-width: 220px;
       border-radius: 8px;
@@ -48,6 +52,11 @@
       color: #fff;
       padding: 10px;
       font-size: 16px;
+    }
+
+    .inline-number {
+      max-width: 140px;
+      min-width: 120px;
     }
 
     button {
@@ -64,14 +73,34 @@
       font-size: 26px;
       direction: rtl;
       text-align: right;
+      font-family: 'Vazirmatn', 'Noto Naskh Arabic', Tahoma, sans-serif;
       min-height: 36px;
       border-top: 1px solid #2e2e2e;
       padding-top: 10px;
     }
 
+    #wordInput {
+      font-family: 'Vazirmatn', 'Noto Naskh Arabic', Tahoma, sans-serif;
+    }
+
     #status {
       margin-top: 8px;
       color: #9d9d9d;
+      font-size: 13px;
+    }
+
+    .menu-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid #2e2e2e;
+    }
+
+    #fontModeValue {
+      color: #c7c7c7;
       font-size: 13px;
     }
   </style>
@@ -80,18 +109,49 @@
   <div id="app">
     <div class="panel">
       <div>Farsi Rendering Bridge</div>
-      <label class="label" for="openaiKeyInput">OpenAI API key</label>
-      <input id="openaiKeyInput" type="password" placeholder="Paste OpenAI API key" />
-      <div class="row">
-        <button id="startMicBtn" type="button">Start real-time EN→FA</button>
-        <button id="stopMicBtn" type="button">Stop</button>
+      <label class="label" for="experienceModeSelect">Mode</label>
+      <select id="experienceModeSelect">
+        <option value="translator">1) Farsi Translator</option>
+        <option value="assistant">2) AI Assistant</option>
+      </select>
+      <div id="translatorControls">
+        <label class="label" for="targetLangSelect">Target language</label>
+        <select id="targetLangSelect">
+          <option value="fa">Farsi (Persian)</option>
+          <option value="ar">Arabic</option>
+          <option value="ur">Urdu</option>
+        </select>
+        <label class="label" for="idleClearSecondsInput">Disappear delay (seconds)</label>
+        <input id="idleClearSecondsInput" class="inline-number" type="number" min="1" max="60" step="1" value="4" />
+        <div class="row">
+          <button id="startMicBtn" type="button">Start real-time EN→FA</button>
+          <button id="stopMicBtn" type="button">Stop</button>
+        </div>
+        <div class="row">
+          <input id="wordInput" type="text" dir="rtl" placeholder="Type a word..." />
+          <button id="addWordBtn" type="button">Add word</button>
+          <button id="clearBtn" type="button">Clear</button>
+        </div>
+        <div id="preview"></div>
+        <div class="menu-row">
+          <button id="fontDecBtn" type="button">A- (Small)</button>
+          <span id="fontModeValue">Large (3 lines)</span>
+          <button id="fontIncBtn" type="button">A+ (Large)</button>
+          <button id="fontXlBtn" type="button">A++ (XL)</button>
+        </div>
       </div>
-      <div class="row">
-        <input id="wordInput" type="text" dir="rtl" placeholder="یک کلمه بنویسید" />
-        <button id="addWordBtn" type="button">Add word</button>
-        <button id="clearBtn" type="button">Clear</button>
+      <div id="assistantControls" style="display:none;">
+        <div class="label">AI Assistant mode on glasses:</div>
+        <div class="label">- Scroll chat with up/down</div>
+        <div class="label">- Enter keyboard: up up down down</div>
+        <div class="label">- Submit in keyboard with double-click</div>
+        <div class="menu-row">
+          <button id="assistantFontDecBtn" type="button">A- (Small)</button>
+          <span id="assistantFontModeValue">Large (chat)</span>
+          <button id="assistantFontIncBtn" type="button">A+ (Large)</button>
+          <button id="assistantFontXlBtn" type="button">A++ (XL)</button>
+        </div>
       </div>
-      <div id="preview"></div>
       <div id="status">Connecting to Even bridge...</div>
     </div>
   </div>
